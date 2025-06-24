@@ -25,10 +25,6 @@
       ignore_errors: false
       register: config_registry_output
 
-    - name: "[ WINDOWS | SETTINGS | WINDOWS UDPATE ] Search for Windows Updates"
-      ansible.windows.win_updates:
-        state: downloaded
-
     - name: "[ WINDOWS | SETTINGS | SECURITY] Disable Netbios on Ethernet cards"
       ansible.windows.win_powershell:
         script: |
@@ -86,7 +82,6 @@
           choco install firefox --yes --limit-output
           choco install vlc --yes --limit-output
           choco install everything --yes --limit-output
-          choco install treesizefree --yes --limit-output
           choco install vcredist140 --yes --limit-output
 
     - name: "[ WINDOWS | SOFTWARE | INSTALL] Installing Microsoft Office"
@@ -97,9 +92,12 @@
         params: '/64bit /Language:en-us /Product:O365ProPlusRetail /Exclude:Publisher,Access,Lync,Groove'
       ignore_errors: true
 
-    - name: "[ WINDOWS | UPDATE ] Install All Windows Updates"
+    - name: Install Windows Updates (excluding problematic ones)
       ansible.windows.win_updates:
-        category_names: '*'
+        category_names:
+          - SecurityUpdates
+          - CriticalUpdates
+          - UpdateRollups
         reboot: true
 
     - name: "[ WINDOWS | UPDATE ] Wait for system to become reachable over WinRM"
