@@ -84,7 +84,6 @@
         script: |
           choco install 7zip --yes --limit-output
           choco install firefox --yes --limit-output
-          choco install notepadplusplus --version=8.4.9 --yes --limit-output
           choco install vlc --yes --limit-output
           choco install everything --yes --limit-output
           choco install treesizefree --yes --limit-output
