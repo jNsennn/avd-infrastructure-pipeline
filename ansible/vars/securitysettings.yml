@@ -1,0 +1,56 @@
+---
+var_playbook_securitysettings:
+  SMBSigining_Server:
+    reg_path: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters
+    reg_name: requiresecuritysignature
+    reg_data: 1
+    reg_type: dword
+    reg_state: present
+  SMBSigining_client:
+    reg_path: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters
+    reg_name: requiresecuritysignature
+    reg_data: 1
+    reg_type: dword
+    reg_state: present
+  Disable_SMBv1_Server:
+    reg_path: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters
+    reg_name: SMB1
+    reg_data: 0
+    reg_type: dword
+    reg_state: present
+  Disable_SMBv1_Client:
+    reg_path: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters
+    reg_name: SMB1
+    reg_data: 0
+    reg_type: dword
+    reg_state: present
+  Disable_mDNS:
+    reg_path: HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters
+    reg_name: enableMDNS
+    reg_data: 0
+    reg_type: dword
+    reg_state: present
+  Disable_LLMNR:
+    reg_path: HKLM:\Software\policies\Microsoft\Windows NT\DNSClient
+    reg_name: EnableMulticast
+    reg_data: 0
+    reg_type: dword
+    reg_state: present
+  Remove_Autologon_DefaultUserreg_name:
+    reg_path: HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon
+    reg_name: DefaultUser
+    reg_data: ""
+    reg_type: string
+    reg_state: absent
+  Remove_Autologon_AutoAdminLogon:
+    reg_path: HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon
+    reg_name: AutoAdminLogon
+    reg_data: 0
+    reg_type: string
+    reg_state: present
+  Prefer_IPv4_over_IPv6:
+    reg_path: HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters
+    reg_name: DisabledComponents
+    reg_data: 32
+    reg_type: dword
+    reg_state: present

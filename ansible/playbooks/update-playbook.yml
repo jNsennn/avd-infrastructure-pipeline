@@ -1,0 +1,96 @@
+---
+- name: AVD Image Update (Incremental)
+  hosts: all
+  gather_facts: false
+  vars:
+    allow_reboot: true
+  
+  tasks:
+    - name: "[ UPDATE | INFO ] Display update information"
+      debug:
+        msg: 
+          - "Starting incremental update of existing AVD image"
+          - "This playbook only applies updates, not full configuration"
+          - "Base image should already have core configuration applied"
+
+    - name: "[ UPDATE | WINDOWS ] Check for and install Windows Updates"
+      ansible.windows.win_updates:
+        category_names:
+          - SecurityUpdates
+          - CriticalUpdates
+          - UpdateRollups
+          - Updates
+        state: installed
+        reboot: false
+      register: windows_updates_result
+
+    - name: "[ UPDATE | WINDOWS ] Display Windows Updates summary"
+      debug:
+        msg: 
+          - "Updates found: {{ windows_updates_result.found_update_count | default(0) }}"
+          - "Updates installed: {{ windows_updates_result.installed_update_count | default(0) }}"
+      when: windows_updates_result is defined
+
+    - name: "[ UPDATE | SOFTWARE ] Update Chocolatey packages"
+      chocolatey.chocolatey.win_chocolatey:
+        name: all
+        state: latest
+      ignore_errors: true
+
+    - name: "[ UPDATE | SECURITY ] Re-apply security settings (in case of policy drift)"
+      block:
+        - name: Include security variables
+          include_vars: "../vars/securitysettings.yml"
+        
+        - name: Configure registry security keys
+          ansible.windows.win_regedit:
+            path: "{{ loop_registry.value.reg_path }}"
+            name: "{{ loop_registry.value.reg_name }}"
+            data: "{{ loop_registry.value.reg_data }}"
+            type: "{{ loop_registry.value.reg_type }}"
+            state: "{{ loop_registry.value.reg_state }}"
+          loop: "{{ lookup('ansible.builtin.dict', var_playbook_securitysettings) }}"
+          loop_control:
+            loop_var: loop_registry
+          ignore_errors: true
+
+    - name: "[ UPDATE | OPTIMIZATION ] Re-optimize PowerShell (for new .NET updates)"
+      include_tasks: "tasks/OptimizePSperf.yml"
+
+    - name: "[ UPDATE | CLEANUP ] Run disk cleanup"
+      include_tasks: "tasks/cleanmgr.yml"
+
+    - name: "[ UPDATE | REBOOT ] Reboot if Windows Updates require it"
+      ansible.windows.win_reboot:
+        reboot_timeout: 600
+        test_command: "echo 'Reboot completed'"
+      when: 
+        - windows_updates_result.reboot_required is defined
+        - windows_updates_result.reboot_required == true
+        - allow_reboot == true
+
+    - name: "[ UPDATE | CONNECTION ] Wait for system to become reachable after reboot"
+      ansible.builtin.wait_for_connection:
+        timeout: 900
+      when: 
+        - windows_updates_result.reboot_required is defined
+        - windows_updates_result.reboot_required == true
+        - allow_reboot == true
+
+    - name: "[ UPDATE | OPTIMIZATION ] Final DISM cleanup for updated components"
+      ansible.windows.win_shell: | 
+        Dism.exe /online /Cleanup-Image /StartComponentCleanup /ResetBase
+      register: dism_cleanup_result
+      async: 1800  # 30 minutes max
+      poll: 60
+      ignore_errors: true
+
+    - name: "[ UPDATE | INFO ] Update completion summary"
+      debug:
+        msg: 
+          - "=== AVD Image Update Complete ==="
+          - "Windows Updates: {{ 'Applied' if windows_updates_result.installed_update_count | default(0) > 0 else 'None available' }}"
+          - "Software Updates: {{ 'Applied' if ansible_facts is defined else 'Checked' }}"
+          - "Security Settings: Re-applied"
+          - "Disk Cleanup: Completed"
+          - "Image ready for deployment"

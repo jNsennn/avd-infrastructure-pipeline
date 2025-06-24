@@ -1,0 +1,21 @@
+- name: run cleanmgr with everything set
+  block:
+  - name: set custom flags for cleanmgr run
+    win_shell: |
+      $volume_caches = Get-ChildItem -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches"
+      foreach ($volume_cache in $volume_caches) {
+          New-ItemProperty -Path $volume_cache.PSPath -Name StateFlags0666 -Value 2 -Type DWORD -Force | Out-Null
+      }
+
+  - name: run cleanmgr with custom flag
+    ansible.windows.win_powershell: 
+      script: |
+        Start-Process -FilePath CleanMgr.exe -ArgumentList '/sagerun:666' -WindowStyle Hidden
+
+  always:
+  - name: clear custom flags after cleanmgr run
+    win_shell: |
+      $volume_caches = Get-ChildItem -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches"
+      foreach ($volume_cache in $volume_caches) {
+          Remove-ItemProperty -Path $volume_cache.PSPath -Name StateFlags0666 -Force | Out-Null
+      }

@@ -1,0 +1,187 @@
+---
+- name: Playbook for AVD
+  debugger: never
+  gather_facts: false
+  hosts: all
+  
+  tasks:
+
+    - name: "[ WINDOWS | SETTINGS | OPTIMIZATION ] Optimizing Powershell Performances"
+      include_tasks: "tasks/OptimizePSperf.yml"
+
+    - name: "[ WINDOWS | SETTINGS | WINDOWS UDPATE ] Include vars for Windows Update registry settings"
+      ansible.builtin.include_vars: "../vars/wusettings.yml"
+
+    - name: "[ WINDOWS | SETTINGS | WINDOWS UDPATE ] Configure registry security keys"
+      ansible.windows.win_regedit:
+        path: "{{ loop_registry.value.reg_path }}"
+        name: "{{ loop_registry.value.reg_name }}"
+        data: "{{ loop_registry.value.reg_data }}"
+        type: "{{ loop_registry.value.reg_type }}"
+        state: "{{ loop_registry.value.reg_state }}"
+      loop: "{{ lookup('ansible.builtin.dict',var_playbook_wusettings) }}"
+      loop_control:
+        loop_var: loop_registry
+      ignore_errors: false
+      register: config_registry_output
+
+    - name: "[ WINDOWS | SETTINGS | WINDOWS UDPATE ] Search for Windows Updates"
+      ansible.windows.win_updates:
+        state: downloaded
+
+    - name: "[ WINDOWS | SETTINGS | SECURITY] Disable Netbios on Ethernet cards"
+      ansible.windows.win_powershell:
+        script: |
+          try{
+            $eths = Get-WmiObject Win32_NetworkAdapterConfiguration | Where Description -like "*Ethernet*"
+            foreach ($eth in $eths){ $eth.SetTcpIPNetbios(2) | Out-Null }
+          }
+          catch { Write-Host $_ ; $Ansible.Failed=$true; Exit 1 }
+          
+    - name: "[ WINDOWS | SETTINGS | SECURITY] Include vars for security registry settings"
+      ansible.builtin.include_vars: "../vars/securitysettings.yml"
+
+    - name: "[ WINDOWS | SETTINGS | SECURITY]Configure registry security keys"
+      ansible.windows.win_regedit:
+        path: "{{ loop_registry.value.reg_path }}"
+        name: "{{ loop_registry.value.reg_name }}"
+        data: "{{ loop_registry.value.reg_data }}"
+        type: "{{ loop_registry.value.reg_type }}"
+        state: "{{ loop_registry.value.reg_state }}"
+      loop: "{{ lookup('ansible.builtin.dict',var_playbook_securitysettings) }}"
+      loop_control:
+        loop_var: loop_registry
+      ignore_errors: false
+      register: config_registry_output
+      
+    - name: "[ WINDOWS | SOFTWARE | INSTALL] Installing Chocolatey"
+      win_chocolatey:
+        name: chocolatey
+        state: present
+
+    - name: "[ WINDOWS | SOFTWARE | CUSTOMIZATION] Include vars for chocolaty settings"
+      ansible.builtin.include_vars: "../vars/chocolateysettings.yml"
+    
+    - name: "[ WINDOWS | SOFTWARE | CUSTOMIZATION] Enabling chocolatey features"
+      chocolatey.chocolatey.win_chocolatey_feature:
+        name: "{{ loop_featurename }}"
+        state: enabled
+      loop: "{{ var_choco_feature_enabled }}"
+      loop_control:
+        loop_var: loop_featurename
+        
+
+    - name: "[ WINDOWS | SOFTWARE | CUSTOMIZATION] Disabling chocolatey features"
+      chocolatey.chocolatey.win_chocolatey_feature:
+        name: "{{ loop_featurename }}"
+        state: disabled 
+      loop: "{{ var_choco_feature_disabled }}"
+      loop_control:
+        loop_var: loop_featurename   
+
+    - name: "[ WINDOWS | SOFTWARE | INSTALL] Installing Essential Software Packages"
+      ansible.windows.win_powershell:
+        script: |
+          choco install 7zip --yes --limit-output
+          choco install firefox --yes --limit-output
+          choco install notepadplusplus --version=8.4.9 --yes --limit-output
+          choco install vlc --yes --limit-output
+          choco install everything --yes --limit-output
+          choco install treesizefree --yes --limit-output
+          choco install vcredist140 --yes --limit-output
+
+    - name: "[ WINDOWS | SOFTWARE | INSTALL] Installing Microsoft Office"
+      win_chocolatey:
+        name: microsoft-office-deployment
+        state: present
+        timeout: 3600
+        params: '/64bit /Language:en-us /Product:O365ProPlusRetail /Exclude:Publisher,Access,Lync,Groove'
+      ignore_errors: true
+
+    - name: "[ WINDOWS | UPDATE ] Install All Windows Updates"
+      ansible.windows.win_updates:
+        category_names: '*'
+        reboot: true
+
+    - name: "[ WINDOWS | UPDATE ] Wait for system to become reachable over WinRM"
+      ansible.builtin.wait_for_connection:
+        timeout: 900
+
+    - name: "[ WINDOWS | OPTIMIZATION | CLEANMGR ] Clean Up Disk"
+      include_tasks: "tasks/cleanmgr.yml"
+    
+    - name: "[ WINDOWS | OPTIMIZATION | CLEANMGR ] Reboot post-cleanup"
+      ansible.windows.win_reboot:
+    
+    - name: "[ PACKER | VMWARE ] Wait for system to become reachable over WinRM"
+      ansible.builtin.wait_for_connection:
+        timeout: 900
+    - name: "[ WINDOWS | SYSPREP | PREP ] Remove problematic Windows Store apps"
+      ansible.windows.win_powershell:
+        script: |
+          # Remove problematic Windows Store apps that interfere with Sysprep
+          $appsToRemove = @(
+            "Microsoft.BingWeather",
+            "Microsoft.GetHelp", 
+            "Microsoft.Getstarted",
+            "Microsoft.MicrosoftOfficeHub",
+            "Microsoft.MicrosoftSolitaireCollection",
+            "Microsoft.People",
+            "Microsoft.WindowsAlarms",
+            "Microsoft.WindowsCamera", 
+            "Microsoft.WindowsMaps",
+            "Microsoft.Xbox.TCUI",
+            "Microsoft.XboxApp",
+            "Microsoft.XboxGameOverlay",
+            "Microsoft.XboxGamingOverlay",
+            "Microsoft.XboxIdentityProvider",
+            "Microsoft.XboxSpeechToTextOverlay",
+            "Microsoft.ZuneMusic",
+            "Microsoft.ZuneVideo"
+          )
+          
+          foreach ($app in $appsToRemove) {
+            try {
+              Write-Host "Removing $app..."
+              Get-AppxPackage -Name $app -AllUsers | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+              Get-AppxProvisionedPackage -Online | Where-Object DisplayName -eq $app | Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
+            } catch {
+              Write-Host "Could not remove $app (this is normal)"
+            }
+          }
+          
+          Write-Host "Windows Store app cleanup completed"
+        
+    - name: "[ WINDOWS | OPTIMIZATION | DISM | CLEANUP ] Start  Dism.exe /online /Cleanup-Image /StartComponentCleanup /ResetBase - STEP 1"
+      ansible.windows.win_shell: | 
+        Dism.exe /online /Cleanup-Image /StartComponentCleanup /ResetBase
+      register: dismcleanup_output_step1
+      async: 3600
+      poll: 60
+      ignore_errors: true
+
+    - name: "[ WINDOWS | OPTIMIZATION | DISM | CLEANUP ] Reboot Machine"
+      ansible.windows.win_reboot:
+        reboot_timeout: 600
+      when: 
+        - dismcleanup_output_step1.rc != 0
+        - allow_reboot == true
+
+    - name: "[ WINDOWS | OPTIMIZATION | DISM | CLEANUP ] Wait for system to become reachable over WinRM"
+      ansible.builtin.wait_for_connection:
+        timeout: 900
+      when: 
+        - dismcleanup_output_step1.rc != 0
+        - allow_reboot == true
+    
+    - name: "[ WINDOWS | OPTIMIZATION | DISM | CLEANUP ] Start  Dism.exe /online /Cleanup-Image /StartComponentCleanup /ResetBase - STEP 2"
+      ansible.windows.win_shell: | 
+        Dism.exe /online /Cleanup-Image /StartComponentCleanup /ResetBase   
+      register: dismcleanup_output
+      async: 3600
+      poll: 60
+      failed_when: dismcleanup_output.rc != 0
+      ignore_errors: false
+      when: 
+        - dismcleanup_output_step1.rc != 0
+        - allow_reboot == true

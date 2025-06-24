@@ -1,0 +1,74 @@
+---
+var_playbook_wusettings:
+  AlwaysAutoRebootAtScheduledTime:
+    reg_path: HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU
+    reg_name: AlwaysAutoRebootAtScheduledTime
+    reg_data: 0
+    reg_type: dword
+    reg_state: present
+  Automatic_Updates:
+    reg_path: HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU
+    reg_name: AUOptions
+    reg_data: 3
+    reg_type: dword
+    reg_state: present
+  Detection_Frequency:
+    reg_path: HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU
+    reg_name: DetectionFrequencyEnabled
+    reg_data: 1
+    reg_type: dword
+    reg_state: present
+  Automatic_Updates_Detection_Frequency:
+    reg_path: HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU
+    reg_name: DetectionFrequency
+    reg_data: 2
+    reg_type: dword
+    reg_state: present
+  Including_recommended_Updates:
+    reg_path: HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU
+    reg_name: IncludeRecommendedUpdates
+    reg_data: 1
+    reg_type: dword
+    reg_state: present
+  Hide_Install_Updates_and_Shut_Down:
+    reg_path: HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU
+    reg_name: NoAUAsDefaultShutdownOption
+    reg_data: 1
+    reg_type: dword
+    reg_state: present
+  Hide_Install_Updates_and_Restart:
+    reg_path: HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU
+    reg_name: NoAUShutdownOption
+    reg_data: 1
+    reg_type: dword
+    reg_state: absent
+  Disable_Auto-reboot_with_logged_on_users:
+    reg_path: HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU
+    reg_name: NoAutoRebootWithLoggedOnUsers
+    reg_data: 1
+    reg_type: dword
+    reg_state: present
+  No_Auto_Update:
+    reg_path: HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU
+    reg_name: NoAutoUpdate
+    reg_data: 0
+    reg_type: dword
+    reg_state: present
+  Exclude_drivers_from_Windows Update:
+    reg_path: HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\
+    reg_name: ExcludeWUDriversInQualityUpdate
+    reg_data: 1
+    reg_type: dword
+    reg_state: present
+  Disable_Auto_Restart_Notification:
+    reg_path: HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\
+    reg_name: SetAutoRestartNotificationDisable
+    reg_data: 1
+    reg_type: dword
+    reg_state: present
+  Update_Notification_Level:
+    reg_path: HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\
+    reg_name: UpdateNotificationLevel
+    reg_data: 2
+    reg_type: dword
+    reg_state: present

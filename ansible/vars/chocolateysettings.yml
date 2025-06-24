@@ -1,0 +1,12 @@
+---
+var_choco_feature_enabled:
+  - useFipsCompliantChecksums
+  - allowGlobalConfirmation
+  - useEnhancedExitCodes
+  - usePackageExitCodes
+  - stopOnFirstPackageFailure
+
+var_choco_feature_disabled:
+  - exitOnRebootDetected
+  - showDownloadProgress
+  - autoUninstaller

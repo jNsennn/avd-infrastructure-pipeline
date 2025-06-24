@@ -1,0 +1,28 @@
+- name: Optimize PowerShell performance to reduce Ansible task overhead
+  ansible.windows.win_powershell: 
+    script: |
+        # Get the path to the ngen executable dynamically
+        $ngenPath = [System.IO.Path]::Combine([Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory(), "ngen.exe")
+
+        # Check if ngen.exe exists
+        if (-Not (Test-Path $ngenPath)) {return}
+
+        # Get a list of loaded assemblies
+        $assemblies = [AppDomain]::CurrentDomain.GetAssemblies()
+
+        # Filter assemblies based on the provided filter
+        $filteredAssemblies = $assemblies | Where-Object { $_.FullName -ilike "$assemblyFilter*" }
+
+        if ($filteredAssemblies.Count -eq 0) {return}
+
+        foreach ($assembly in $filteredAssemblies) {
+            # Get the name of the assembly
+            $name = [System.IO.Path]::GetFileName($assembly.Location)
+
+            # Use Ngen to install the assembly
+            Start-Process -FilePath $ngenPath -ArgumentList "install `"$($assembly.Location)`"" -Wait -WindowStyle Hidden
+        }
+
+- name: "[ PACKER | VMWARE ] change powerplan to high performance"
+  community.windows.win_power_plan:
+    name: high performance

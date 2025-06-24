@@ -1,0 +1,386 @@
+name: Update AVD Host Pool with Latest Image
+
+on:
+  # Trigger manually
+  workflow_dispatch:
+    inputs:
+      force_recreate:
+        description: 'Force recreate all session hosts'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      image_name:
+        description: 'Specific image name (leave empty for latest)'
+        required: false
+        default: ''
+        type: string
+
+  # Trigger automatically after image build completes
+  workflow_run:
+    workflows: ["Weekly AVD Image Update"]
+    types:
+      - completed
+    branches: [main]
+
+env:
+  TF_VAR_admin_password: ${{ secrets.AVD_ADMIN_PASSWORD }}
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  PACKER_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  check-image-build:
+    runs-on: ubuntu-latest
+    outputs:
+      should_update: ${{ steps.check.outputs.should_update }}
+      new_image: ${{ steps.check.outputs.new_image }}
+    steps:
+      - name: Check if image build was successful
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_run" ]; then
+            if [ "${{ github.event.workflow_run.conclusion }}" == "success" ]; then
+              echo "should_update=true" >> $GITHUB_OUTPUT
+              echo "Image build successful, proceeding with host pool update"
+            else
+              echo "should_update=false" >> $GITHUB_OUTPUT
+              echo "Image build failed, skipping host pool update"
+            fi
+          else
+            # Manual trigger - always proceed
+            echo "should_update=true" >> $GITHUB_OUTPUT
+            echo "Manual trigger, proceeding with host pool update"
+          fi
+
+  update-hostpool:
+    runs-on: ubuntu-latest
+    if: needs.check-image-build.outputs.should_update == 'true'
+    needs: [check-image-build]
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: latest
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: |
+            {
+              "clientId": "${{ secrets.AZURE_CLIENT_ID }}",
+              "clientSecret": "${{ secrets.AZURE_CLIENT_SECRET }}",
+              "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
+              "tenantId": "${{ secrets.AZURE_TENANT_ID }}"
+            }
+
+      - name: Find Latest Image
+        id: find-image
+        run: |
+          if [ -n "${{ github.event.inputs.image_name }}" ]; then
+            # Use specified image
+            IMAGE_NAME="${{ github.event.inputs.image_name }}"
+            echo "Using specified image: $IMAGE_NAME"
+          else
+            # Find latest image
+            IMAGE_NAME=$(az image list \
+              --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+              --query "[?starts_with(name, 'avd-win11-')] | sort_by(@, &name) | [-1].name" \
+              --output tsv)
+          fi
+          
+          if [ -z "$IMAGE_NAME" ]; then
+            echo "❌ No AVD images found!"
+            exit 1
+          fi
+          
+          echo "image_name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "✅ Found image: $IMAGE_NAME"
+
+      - name: Check Current Image in Use
+        id: current-image
+        working-directory: terraform
+        run: |
+          # Initialize Terraform to read state
+          terraform init
+          
+          echo "=== Checking Current Deployment State ==="
+          
+          # Check what's actually deployed
+          DEPLOYED_RESOURCES=$(terraform state list 2>/dev/null || echo "")
+          
+          if [ -z "$DEPLOYED_RESOURCES" ]; then
+            echo "No Terraform state found - this is a fresh deployment"
+            CURRENT_IMAGE="none"
+            DEPLOYMENT_STATE="fresh"
+          else
+            echo "Found existing Terraform state with these resources:"
+            echo "$DEPLOYED_RESOURCES"
+            echo ""
+            
+            # Check if session host VMs exist
+            if echo "$DEPLOYED_RESOURCES" | grep -q "azurerm_windows_virtual_machine.avd_vm"; then
+              echo "✅ Session host VMs found in state"
+              DEPLOYMENT_STATE="complete"
+              
+              # Try to get image information from outputs first
+              if terraform output image_selection_debug >/dev/null 2>&1; then
+                echo "📊 Getting image info from Terraform outputs..."
+                OUTPUT=$(terraform output -raw image_selection_debug 2>/dev/null)
+                
+                if [ -n "$OUTPUT" ] && echo "$OUTPUT" | jq empty >/dev/null 2>&1; then
+                  CURRENT_IMAGE=$(echo "$OUTPUT" | jq -r '.selected_image // "unknown"')
+                  echo "Current image from outputs: $CURRENT_IMAGE"
+                else
+                  echo "⚠️ Output exists but is not valid JSON, trying alternative method..."
+                  CURRENT_IMAGE="unknown"
+                fi
+              else
+                echo "⚠️ image_selection_debug output not available, checking VM state directly..."
+                CURRENT_IMAGE="unknown"
+              fi
+              
+              # If we couldn't get it from outputs, try to extract from VM state
+              if [ "$CURRENT_IMAGE" == "unknown" ]; then
+                echo "🔍 Extracting image info from VM configuration..."
+                VM_IMAGE_ID=$(terraform show -json 2>/dev/null | jq -r '.values.root_module.resources[] | select(.type == "azurerm_windows_virtual_machine" and .name == "avd_vm") | .values.source_image_id // null' 2>/dev/null)
+                
+                if [ "$VM_IMAGE_ID" != "null" ] && [ -n "$VM_IMAGE_ID" ]; then
+                  CURRENT_IMAGE=$(basename "$VM_IMAGE_ID")
+                  echo "Extracted from VM state: $CURRENT_IMAGE"
+                else
+                  CURRENT_IMAGE="marketplace"
+                  echo "VMs appear to be using marketplace image"
+                fi
+              fi
+              
+            else
+              echo "⚠️ Partial deployment detected:"
+              echo "  - Infrastructure exists (host pool, etc.)"
+              echo "  - But no session host VMs found"
+              echo "  - This suggests an incomplete or failed previous deployment"
+              CURRENT_IMAGE="none"
+              DEPLOYMENT_STATE="partial"
+            fi
+          fi
+          
+          NEW_IMAGE="${{ steps.find-image.outputs.image_name }}"
+          
+          echo ""
+          echo "=== Summary ==="
+          echo "Deployment state: $DEPLOYMENT_STATE"
+          echo "Current image: $CURRENT_IMAGE"
+          echo "New image: $NEW_IMAGE"
+          echo "Force recreate: ${{ github.event.inputs.force_recreate || 'false' }}"
+          
+          # Set outputs
+          echo "current_image=$CURRENT_IMAGE" >> $GITHUB_OUTPUT
+          echo "new_image=$NEW_IMAGE" >> $GITHUB_OUTPUT
+          echo "deployment_state=$DEPLOYMENT_STATE" >> $GITHUB_OUTPUT
+          
+          # Determine if update is needed
+          if [ "$DEPLOYMENT_STATE" == "fresh" ] || [ "$DEPLOYMENT_STATE" == "partial" ]; then
+            echo "needs_update=true" >> $GITHUB_OUTPUT
+            echo "🚀 New or incomplete deployment - will create/complete infrastructure"
+          elif [ "$CURRENT_IMAGE" == "$NEW_IMAGE" ] && [ "${{ github.event.inputs.force_recreate }}" != "true" ]; then
+            echo "needs_update=false" >> $GITHUB_OUTPUT
+            echo "✅ Host pool already using latest image: $NEW_IMAGE"
+          else
+            echo "needs_update=true" >> $GITHUB_OUTPUT
+            echo "🔄 Host pool needs update:"
+            echo "  Current: $CURRENT_IMAGE"
+            echo "  New:     $NEW_IMAGE"
+          fi
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: terraform
+        if: steps.current-image.outputs.needs_update == 'true' || github.event.inputs.force_recreate == 'true'
+        run: |
+          # Set build info variables
+          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          BUILD_NUMBER="${{ github.run_number }}"
+          GIT_COMMIT="${{ github.sha }}"
+          
+          # Determine if we need to force recreate
+          FORCE_RECREATE="${{ github.event.inputs.force_recreate == 'true' }}"
+          
+          echo "Planning with the following parameters:"
+          echo "  Image: ${{ steps.find-image.outputs.image_name }}"
+          echo "  Force Recreate: $FORCE_RECREATE"
+          echo "  Build Date: $BUILD_DATE"
+          echo "  Build Number: $BUILD_NUMBER"
+          
+          # Plan the update
+          terraform plan \
+            -var="avd_image_name=${{ steps.find-image.outputs.image_name }}" \
+            -var="force_recreate_session_hosts=$FORCE_RECREATE" \
+            -var="image_build_info={build_date=\"$BUILD_DATE\",build_number=\"$BUILD_NUMBER\",git_commit=\"$GIT_COMMIT\"}" \
+            -out=tfplan \
+            -detailed-exitcode
+        continue-on-error: true
+
+      - name: Create Plan Summary
+        if: steps.plan.outcome != 'skipped'
+        working-directory: terraform
+        run: |
+          echo "## 🔄 Terraform Plan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Current Image | ${{ steps.current-image.outputs.current_image }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| New Image | ${{ steps.find-image.outputs.image_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Force Recreate | ${{ github.event.inputs.force_recreate || 'false' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Plan Exit Code | ${{ steps.plan.outputs.exitcode }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Triggered By | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.plan.outputs.exitcode }}" == "2" ]; then
+            echo "| Changes Detected | ✅ Yes |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 📋 Planned Changes" >> $GITHUB_STEP_SUMMARY
+            echo "- Session hosts will be recreated with new image" >> $GITHUB_STEP_SUMMARY
+            echo "- AVD agent will be reinstalled and registered" >> $GITHUB_STEP_SUMMARY
+            echo "- VM extensions will be reconfigured" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ steps.plan.outputs.exitcode }}" == "0" ]; then
+            echo "| Changes Detected | ❌ No |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Changes Detected | ❌ Plan Failed |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Handle Force Recreate
+        if: github.event.inputs.force_recreate == 'true' && steps.plan.outputs.exitcode == '0'
+        working-directory: terraform
+        run: |
+          echo "🔄 Force recreate requested but no changes detected in plan"
+          echo "Using terraform taint to force recreation of session hosts..."
+          
+          # Get the number of session hosts from terraform.tfvars
+          RDSH_COUNT=$(grep "rdsh_count" terraform.tfvars | cut -d'=' -f2 | tr -d ' ')
+          
+          # Taint all session host VMs to force recreation
+          for i in $(seq 0 $((RDSH_COUNT-1))); do
+            echo "Tainting azurerm_windows_virtual_machine.avd_vm[$i]"
+            terraform taint "azurerm_windows_virtual_machine.avd_vm[$i]" || echo "VM $i may not exist yet"
+          done
+          
+          # Re-run plan after tainting
+          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          BUILD_NUMBER="${{ github.run_number }}"
+          GIT_COMMIT="${{ github.sha }}"
+          
+          terraform plan \
+            -var="avd_image_name=${{ steps.find-image.outputs.image_name }}" \
+            -var="force_recreate_session_hosts=true" \
+            -var="image_build_info={build_date=\"$BUILD_DATE\",build_number=\"$BUILD_NUMBER\",git_commit=\"$GIT_COMMIT\"}" \
+            -out=tfplan \
+            -detailed-exitcode
+
+      - name: Terraform Apply
+        if: steps.plan.outputs.exitcode == '2' || (github.event.inputs.force_recreate == 'true' && steps.plan.outcome == 'success')
+        working-directory: terraform
+        run: |
+          echo "🚀 Applying Terraform changes..."
+          echo "This will recreate session hosts with the new image: ${{ steps.find-image.outputs.image_name }}"
+          
+          terraform apply -auto-approve tfplan
+          
+          echo "✅ Host pool updated successfully!"
+
+      - name: Verify Update
+        if: steps.plan.outputs.exitcode == '2' || (github.event.inputs.force_recreate == 'true' && steps.plan.outcome == 'success')
+        run: |
+          echo "🔍 Verifying host pool update..."
+          
+          # Wait a moment for VMs to be fully provisioned
+          sleep 30
+          
+          # Check session hosts are using new image
+          SESSION_HOSTS=$(az vm list \
+            --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+            --query "[?starts_with(name, 'avd-')].name" \
+            --output tsv)
+          
+          if [ -z "$SESSION_HOSTS" ]; then
+            echo "❌ No session hosts found! This might indicate a deployment issue."
+            exit 1
+          fi
+          
+          echo "Session hosts found: $SESSION_HOSTS"
+          echo ""
+          echo "Image information for each host:"
+          
+          for host in $SESSION_HOSTS; do
+            echo "Checking $host..."
+            
+            # Get VM image information
+            VM_IMAGE_ID=$(az vm show \
+              --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+              --name "$host" \
+              --query "storageProfile.imageReference.id" \
+              --output tsv 2>/dev/null || echo "marketplace")
+            
+            VM_TAGS=$(az vm show \
+              --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+              --name "$host" \
+              --query "tags.ImageName" \
+              --output tsv 2>/dev/null || echo "unknown")
+            
+            if [ "$VM_IMAGE_ID" == "marketplace" ] || [ -z "$VM_IMAGE_ID" ]; then
+              echo "  $host: Using marketplace image (tag: $VM_TAGS)"
+            else
+              IMAGE_NAME=$(basename "$VM_IMAGE_ID")
+              echo "  $host: Using custom image: $IMAGE_NAME (tag: $VM_TAGS)"
+            fi
+          done
+          
+          echo ""
+          echo "✅ Verification completed"
+
+      - name: Post Update Actions
+        if: steps.plan.outputs.exitcode == '2' || (github.event.inputs.force_recreate == 'true' && steps.plan.outcome == 'success')
+        run: |
+          echo "## 🎉 AVD Host Pool Update Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Changes Applied:" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Updated to image: ${{ steps.find-image.outputs.image_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Session hosts recreated with new image" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ AVD agent reinstalled and registered" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ AVD environment ready for use" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next Steps:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Test AVD connectivity at: https://rdweb.wvd.microsoft.com/arm/webclient/index.html" >> $GITHUB_STEP_SUMMARY
+          echo "2. Verify applications are working correctly" >> $GITHUB_STEP_SUMMARY
+          echo "3. Monitor session host performance" >> $GITHUB_STEP_SUMMARY
+          echo "4. Run user permission assignments if needed" >> $GITHUB_STEP_SUMMARY
+
+      - name: No Update Needed
+        if: steps.current-image.outputs.needs_update == 'false' && github.event.inputs.force_recreate != 'true'
+        run: |
+          echo "## ✅ No Update Required" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Host pool is already using the latest image:" >> $GITHUB_STEP_SUMMARY
+          echo "**${{ steps.find-image.outputs.image_name }}**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Current Status:" >> $GITHUB_STEP_SUMMARY
+          echo "- Image in use: ${{ steps.current-image.outputs.current_image }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Latest available: ${{ steps.find-image.outputs.image_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- No changes required" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Terraform Logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-logs-${{ github.run_number }}
+          path: |
+            terraform/*.log
+            terraform/tfplan
+            terraform/.terraform.lock.hcl
+          retention-days: 7
