@@ -23,6 +23,13 @@ on:
     workflows: ["Weekly AVD Image Update"]
     types:
       - completed
+    branches:
+      - main
+      - 'fix/**'
+      - 'feature/**'
+      - 'debug/**'
+      - 'dev/**'
+      # Add specific branch patterns as needed
       
 env:
   TF_VAR_admin_password: ${{ secrets.AVD_ADMIN_PASSWORD }}
