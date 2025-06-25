@@ -25,10 +25,6 @@
       ignore_errors: false
       register: config_registry_output
 
-    - name: "[ WINDOWS | SETTINGS | WINDOWS UDPATE ] Search for Windows Updates"
-      ansible.windows.win_updates:
-        state: downloaded
-
     - name: "[ WINDOWS | SETTINGS | SECURITY] Disable Netbios on Ethernet cards"
       ansible.windows.win_powershell:
         script: |
@@ -84,10 +80,8 @@
         script: |
           choco install 7zip --yes --limit-output
           choco install firefox --yes --limit-output
-          choco install notepadplusplus --version=8.4.9 --yes --limit-output
           choco install vlc --yes --limit-output
           choco install everything --yes --limit-output
-          choco install treesizefree --yes --limit-output
           choco install vcredist140 --yes --limit-output
 
     - name: "[ WINDOWS | SOFTWARE | INSTALL] Installing Microsoft Office"
@@ -100,8 +94,16 @@
 
     - name: "[ WINDOWS | UPDATE ] Install All Windows Updates"
       ansible.windows.win_updates:
-        category_names: '*'
+        category_names:
+          - SecurityUpdates
+          - CriticalUpdates
+          - UpdateRollups
+        reject_list:
+          - "KB5007651"  # Windows Security platform update causing reboot loop
         reboot: true
+        reboot_timeout: 1800
+      ignore_errors: true
+      when: debug_updates | default(true) | bool
 
     - name: "[ WINDOWS | UPDATE ] Wait for system to become reachable over WinRM"
       ansible.builtin.wait_for_connection:

@@ -231,6 +231,7 @@ jobs:
         echo "| Source Image | ${{ steps.find-image.outputs.latest_image || 'Marketplace Image' }} |" >> $GITHUB_STEP_SUMMARY
         echo "| Resource Group | ${{ secrets.AZURE_RESOURCE_GROUP }} |" >> $GITHUB_STEP_SUMMARY
         echo "| Build Time | $(date) |" >> $GITHUB_STEP_SUMMARY
+        echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
         
         if [ "${{ job.status }}" == "success" ]; then
           echo "| Next Steps | Image is ready for AVD deployment |" >> $GITHUB_STEP_SUMMARY
@@ -242,14 +243,18 @@ jobs:
           echo "- Verify Azure credentials and permissions" >> $GITHUB_STEP_SUMMARY
           echo "- Ensure WinRM connectivity is working" >> $GITHUB_STEP_SUMMARY
         fi
-    - name: Trigger Host Pool Update
+    
+    - name: Image Build Complete
       if: success()
       run: |
-        # Trigger the host pool update workflow
-        curl -X POST \
-          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-          -H "Accept: application/vnd.github.v3+json" \
-          https://api.github.com/repos/${{ github.repository }}/actions/workflows/update-avd-hostpool.yml/dispatches \
-          -d '{"ref":"main"}'
-        
-        echo "✅ Triggered AVD host pool update workflow"
+        echo "✅ AVD image build completed successfully!"
+        echo "📋 Built image: ${{ steps.find-image.outputs.new_image_name }}"
+        echo "🔄 The 'Update AVD Host Pool' workflow should trigger automatically via workflow_run"
+        echo ""
+        echo "=== Build Details ==="
+        echo "Branch: ${{ github.ref_name }}"
+        echo "Repository: ${{ github.repository }}"
+        echo "Image: ${{ steps.find-image.outputs.new_image_name }}"
+        echo "Resource Group: ${{ secrets.AZURE_RESOURCE_GROUP }}"
+        echo ""
+        echo "⏳ Waiting for automatic trigger of host pool update workflow..."

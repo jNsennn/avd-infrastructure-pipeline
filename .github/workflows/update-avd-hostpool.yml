@@ -7,7 +7,7 @@ on:
       force_recreate:
         description: 'Force recreate all session hosts'
         required: false
-        default: 'false'
+        default: 'true'
         type: choice
         options:
           - 'true'
@@ -23,8 +23,7 @@ on:
     workflows: ["Weekly AVD Image Update"]
     types:
       - completed
-    branches: [main]
-
+      
 env:
   TF_VAR_admin_password: ${{ secrets.AVD_ADMIN_PASSWORD }}
   ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
@@ -83,28 +82,112 @@ jobs:
               "tenantId": "${{ secrets.AZURE_TENANT_ID }}"
             }
 
+      - name: Get Resource Group Configuration
+        id: get-config
+        working-directory: terraform
+        run: |
+          # Get the AVD resource group name from terraform.tfvars
+          AVD_RESOURCE_GROUP=$(grep "resource_group_name" terraform.tfvars | cut -d'=' -f2 | tr -d ' "')
+          
+          echo "=== Resource Group Configuration ==="
+          echo "Images Resource Group (Packer): ${{ secrets.AZURE_RESOURCE_GROUP }}"
+          echo "AVD Resource Group (Terraform): $AVD_RESOURCE_GROUP"
+          
+          # Set outputs for use in other steps
+          echo "avd_resource_group=$AVD_RESOURCE_GROUP" >> $GITHUB_OUTPUT
+          echo "image_resource_group=${{ secrets.AZURE_RESOURCE_GROUP }}" >> $GITHUB_OUTPUT
+
       - name: Find Latest Image
         id: find-image
         run: |
+          echo "=== Debugging Image Search ==="
+          echo "Searching in resource group: ${{ steps.get-config.outputs.image_resource_group }}"
+          
+          # First, list ALL images in the resource group to see what's actually there
+          echo "All images in resource group:"
+          az image list \
+            --resource-group "${{ steps.get-config.outputs.image_resource_group }}" \
+            --query "[].{Name:name, Created:timeCreated}" \
+            --output table || echo "Failed to list images or no images found"
+          
           if [ -n "${{ github.event.inputs.image_name }}" ]; then
             # Use specified image
             IMAGE_NAME="${{ github.event.inputs.image_name }}"
             echo "Using specified image: $IMAGE_NAME"
           else
-            # Find latest image
+            # Try to find latest image with different patterns
+            echo ""
+            echo "=== Trying different search patterns ==="
+            
+            # Pattern 1: avd-win11-*
+            echo "1. Searching for images starting with 'avd-win11-':"
             IMAGE_NAME=$(az image list \
-              --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+              --resource-group "${{ steps.get-config.outputs.image_resource_group }}" \
               --query "[?starts_with(name, 'avd-win11-')] | sort_by(@, &name) | [-1].name" \
               --output tsv)
+            
+            if [ -n "$IMAGE_NAME" ]; then
+              echo "✅ Found with 'avd-win11-' pattern: $IMAGE_NAME"
+            else
+              echo "❌ No images found with 'avd-win11-' pattern"
+              
+              # Pattern 2: avd-*
+              echo "2. Searching for images starting with 'avd-':"
+              IMAGE_NAME=$(az image list \
+                --resource-group "${{ steps.get-config.outputs.image_resource_group }}" \
+                --query "[?starts_with(name, 'avd-')] | sort_by(@, &name) | [-1].name" \
+                --output tsv)
+              
+              if [ -n "$IMAGE_NAME" ]; then
+                echo "✅ Found with 'avd-' pattern: $IMAGE_NAME"
+              else
+                echo "❌ No images found with 'avd-' pattern"
+                
+                # Pattern 3: Any image containing 'avd'
+                echo "3. Searching for images containing 'avd':"
+                IMAGE_NAME=$(az image list \
+                  --resource-group "${{ steps.get-config.outputs.image_resource_group }}" \
+                  --query "[?contains(name, 'avd')] | sort_by(@, &name) | [-1].name" \
+                  --output tsv)
+                
+                if [ -n "$IMAGE_NAME" ]; then
+                  echo "✅ Found with 'contains avd' pattern: $IMAGE_NAME"
+                else
+                  echo "❌ No images found containing 'avd'"
+                  
+                  # Pattern 4: Just get the latest image regardless of name
+                  echo "4. Getting the latest image regardless of name:"
+                  IMAGE_NAME=$(az image list \
+                    --resource-group "${{ steps.get-config.outputs.image_resource_group }}" \
+                    --query "sort_by(@, &timeCreated) | [-1].name" \
+                    --output tsv)
+                  
+                  if [ -n "$IMAGE_NAME" ]; then
+                    echo "✅ Found latest image by date: $IMAGE_NAME"
+                  else
+                    echo "❌ No images found at all"
+                  fi
+                fi
+              fi
+            fi
           fi
           
           if [ -z "$IMAGE_NAME" ]; then
-            echo "❌ No AVD images found!"
+            echo ""
+            echo "❌ No AVD images found in resource group: ${{ steps.get-config.outputs.image_resource_group }}"
+            echo "This might mean:"
+            echo "1. No images have been built yet"
+            echo "2. Images are in a different resource group"  
+            echo "3. Images have a different naming pattern"
+            echo "4. The Azure CLI doesn't have permission to list images"
             exit 1
           fi
           
+          echo ""
+          echo "=== Final Result ==="
           echo "image_name=$IMAGE_NAME" >> $GITHUB_OUTPUT
-          echo "✅ Found image: $IMAGE_NAME"
+          echo "✅ Selected image: $IMAGE_NAME"
+          echo "   Resource group: ${{ steps.get-config.outputs.image_resource_group }}"
 
       - name: Check Current Image in Use
         id: current-image
@@ -132,34 +215,62 @@ jobs:
               echo "✅ Session host VMs found in state"
               DEPLOYMENT_STATE="complete"
               
-              # Try to get image information from outputs first
+              # Try to get image information from outputs first (with better error handling)
+              CURRENT_IMAGE="unknown"
+              
+              echo "📊 Trying to get image info from Terraform outputs..."
               if terraform output image_selection_debug >/dev/null 2>&1; then
-                echo "📊 Getting image info from Terraform outputs..."
-                OUTPUT=$(terraform output -raw image_selection_debug 2>/dev/null)
+                OUTPUT=$(terraform output -raw image_selection_debug 2>/dev/null || echo "")
                 
-                if [ -n "$OUTPUT" ] && echo "$OUTPUT" | jq empty >/dev/null 2>&1; then
-                  CURRENT_IMAGE=$(echo "$OUTPUT" | jq -r '.selected_image // "unknown"')
-                  echo "Current image from outputs: $CURRENT_IMAGE"
+                if [ -n "$OUTPUT" ]; then
+                  # Check if it's valid JSON
+                  if echo "$OUTPUT" | jq empty >/dev/null 2>&1; then
+                    CURRENT_IMAGE=$(echo "$OUTPUT" | jq -r '.selected_image // "unknown"' 2>/dev/null || echo "unknown")
+                    if [ "$CURRENT_IMAGE" != "unknown" ]; then
+                      echo "✅ Current image from outputs: $CURRENT_IMAGE"
+                    else
+                      echo "⚠️ Output is valid JSON but selected_image is not available"
+                    fi
+                  else
+                    echo "⚠️ Output exists but is not valid JSON"
+                  fi
                 else
-                  echo "⚠️ Output exists but is not valid JSON, trying alternative method..."
-                  CURRENT_IMAGE="unknown"
+                  echo "⚠️ Output is empty"
                 fi
               else
-                echo "⚠️ image_selection_debug output not available, checking VM state directly..."
-                CURRENT_IMAGE="unknown"
+                echo "⚠️ image_selection_debug output not available"
               fi
               
               # If we couldn't get it from outputs, try to extract from VM state
               if [ "$CURRENT_IMAGE" == "unknown" ]; then
                 echo "🔍 Extracting image info from VM configuration..."
-                VM_IMAGE_ID=$(terraform show -json 2>/dev/null | jq -r '.values.root_module.resources[] | select(.type == "azurerm_windows_virtual_machine" and .name == "avd_vm") | .values.source_image_id // null' 2>/dev/null)
                 
-                if [ "$VM_IMAGE_ID" != "null" ] && [ -n "$VM_IMAGE_ID" ]; then
-                  CURRENT_IMAGE=$(basename "$VM_IMAGE_ID")
-                  echo "Extracted from VM state: $CURRENT_IMAGE"
+                # Try to get VM image ID from terraform show
+                TERRAFORM_SHOW=$(terraform show -json 2>/dev/null || echo "")
+                
+                if [ -n "$TERRAFORM_SHOW" ]; then
+                  VM_IMAGE_ID=$(echo "$TERRAFORM_SHOW" | jq -r '.values.root_module.resources[] | select(.type == "azurerm_windows_virtual_machine" and .name == "avd_vm") | .values.source_image_id // null' 2>/dev/null || echo "null")
+                  
+                  if [ "$VM_IMAGE_ID" != "null" ] && [ -n "$VM_IMAGE_ID" ] && [ "$VM_IMAGE_ID" != "" ]; then
+                    CURRENT_IMAGE=$(basename "$VM_IMAGE_ID")
+                    echo "✅ Extracted from VM state: $CURRENT_IMAGE"
+                  else
+                    echo "🔍 No custom image ID found in VM state, checking for marketplace image..."
+                    
+                    # Check if VMs are using marketplace image
+                    MARKETPLACE_CHECK=$(echo "$TERRAFORM_SHOW" | jq -r '.values.root_module.resources[] | select(.type == "azurerm_windows_virtual_machine" and .name == "avd_vm") | .values.source_image_reference // null' 2>/dev/null || echo "null")
+                    
+                    if [ "$MARKETPLACE_CHECK" != "null" ]; then
+                      CURRENT_IMAGE="marketplace"
+                      echo "✅ VMs appear to be using marketplace image"
+                    else
+                      CURRENT_IMAGE="unknown"
+                      echo "⚠️ Could not determine current image from VM state"
+                    fi
+                  fi
                 else
-                  CURRENT_IMAGE="marketplace"
-                  echo "VMs appear to be using marketplace image"
+                  echo "❌ Failed to get terraform show output"
+                  CURRENT_IMAGE="unknown"
                 fi
               fi
               
@@ -219,10 +330,12 @@ jobs:
           echo "  Force Recreate: $FORCE_RECREATE"
           echo "  Build Date: $BUILD_DATE"
           echo "  Build Number: $BUILD_NUMBER"
+          echo "  Note: Using empty avd_image_name to let Terraform find latest image automatically"
           
-          # Plan the update
+          # IMPORTANT: Pass empty avd_image_name to use "latest image" logic
+          # This matches how your Terraform data sources are configured
           terraform plan \
-            -var="avd_image_name=${{ steps.find-image.outputs.image_name }}" \
+            -var="avd_image_name=" \
             -var="force_recreate_session_hosts=$FORCE_RECREATE" \
             -var="image_build_info={build_date=\"$BUILD_DATE\",build_number=\"$BUILD_NUMBER\",git_commit=\"$GIT_COMMIT\"}" \
             -out=tfplan \
@@ -241,6 +354,8 @@ jobs:
           echo "| Force Recreate | ${{ github.event.inputs.force_recreate || 'false' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Plan Exit Code | ${{ steps.plan.outputs.exitcode }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Triggered By | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image Resource Group | ${{ steps.get-config.outputs.image_resource_group }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| AVD Resource Group | ${{ steps.get-config.outputs.avd_resource_group }} |" >> $GITHUB_STEP_SUMMARY
           
           if [ "${{ steps.plan.outputs.exitcode }}" == "2" ]; then
             echo "| Changes Detected | ✅ Yes |" >> $GITHUB_STEP_SUMMARY
@@ -276,8 +391,9 @@ jobs:
           BUILD_NUMBER="${{ github.run_number }}"
           GIT_COMMIT="${{ github.sha }}"
           
+          # Use empty avd_image_name for latest image logic
           terraform plan \
-            -var="avd_image_name=${{ steps.find-image.outputs.image_name }}" \
+            -var="avd_image_name=" \
             -var="force_recreate_session_hosts=true" \
             -var="image_build_info={build_date=\"$BUILD_DATE\",build_number=\"$BUILD_NUMBER\",git_commit=\"$GIT_COMMIT\"}" \
             -out=tfplan \
@@ -288,7 +404,7 @@ jobs:
         working-directory: terraform
         run: |
           echo "🚀 Applying Terraform changes..."
-          echo "This will recreate session hosts with the new image: ${{ steps.find-image.outputs.image_name }}"
+          echo "This will recreate session hosts with the latest image"
           
           terraform apply -auto-approve tfplan
           
@@ -298,51 +414,95 @@ jobs:
         if: steps.plan.outputs.exitcode == '2' || (github.event.inputs.force_recreate == 'true' && steps.plan.outcome == 'success')
         run: |
           echo "🔍 Verifying host pool update..."
+          echo "Looking for VMs in AVD resource group: ${{ steps.get-config.outputs.avd_resource_group }}"
           
           # Wait a moment for VMs to be fully provisioned
           sleep 30
           
-          # Check session hosts are using new image
+          # Debug: List all VMs in the AVD resource group first
+          echo "=== Debug: All VMs in AVD resource group ==="
+          az vm list \
+            --resource-group "${{ steps.get-config.outputs.avd_resource_group }}" \
+            --query "[].name" \
+            --output table
+          
+          # Check session hosts - try multiple patterns
+          echo "=== Looking for session hosts ==="
+          
+          # Try the original pattern first
           SESSION_HOSTS=$(az vm list \
-            --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+            --resource-group "${{ steps.get-config.outputs.avd_resource_group }}" \
             --query "[?starts_with(name, 'avd-')].name" \
             --output tsv)
           
+          # If that doesn't work, try without the dash
+          if [ -z "$SESSION_HOSTS" ]; then
+            echo "No VMs found with 'avd-' prefix, trying 'avd' prefix..."
+            SESSION_HOSTS=$(az vm list \
+              --resource-group "${{ steps.get-config.outputs.avd_resource_group }}" \
+              --query "[?starts_with(name, 'avd')].name" \
+              --output tsv)
+          fi
+          
+          # If still nothing, get all VMs and filter manually
+          if [ -z "$SESSION_HOSTS" ]; then
+            echo "Still no VMs found, getting all VMs and filtering..."
+            ALL_VMS=$(az vm list \
+              --resource-group "${{ steps.get-config.outputs.avd_resource_group }}" \
+              --query "[].name" \
+              --output tsv)
+            
+            # Filter VMs that contain 'avd'
+            SESSION_HOSTS=$(echo "$ALL_VMS" | grep -i avd || echo "")
+          fi
+          
           if [ -z "$SESSION_HOSTS" ]; then
             echo "❌ No session hosts found! This might indicate a deployment issue."
+            echo "Available VMs in resource group ${{ steps.get-config.outputs.avd_resource_group }}:"
+            az vm list \
+              --resource-group "${{ steps.get-config.outputs.avd_resource_group }}" \
+              --query "[].{Name:name, PowerState:powerState, Location:location}" \
+              --output table
             exit 1
           fi
           
-          echo "Session hosts found: $SESSION_HOSTS"
+          echo "✅ Session hosts found: $SESSION_HOSTS"
           echo ""
-          echo "Image information for each host:"
+          echo "=== Image information for each host ==="
           
           for host in $SESSION_HOSTS; do
             echo "Checking $host..."
             
-            # Get VM image information
-            VM_IMAGE_ID=$(az vm show \
-              --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+            # Get VM details
+            VM_DETAILS=$(az vm show \
+              --resource-group "${{ steps.get-config.outputs.avd_resource_group }}" \
               --name "$host" \
-              --query "storageProfile.imageReference.id" \
-              --output tsv 2>/dev/null || echo "marketplace")
+              --query "{imageId:storageProfile.imageReference.id, imageName:tags.ImageName, powerState:instanceView.statuses[1].displayStatus}" \
+              --output json 2>/dev/null)
             
-            VM_TAGS=$(az vm show \
-              --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
-              --name "$host" \
-              --query "tags.ImageName" \
-              --output tsv 2>/dev/null || echo "unknown")
-            
-            if [ "$VM_IMAGE_ID" == "marketplace" ] || [ -z "$VM_IMAGE_ID" ]; then
-              echo "  $host: Using marketplace image (tag: $VM_TAGS)"
+            if [ $? -eq 0 ] && [ -n "$VM_DETAILS" ]; then
+              VM_IMAGE_ID=$(echo "$VM_DETAILS" | jq -r '.imageId // "marketplace"')
+              VM_TAG=$(echo "$VM_DETAILS" | jq -r '.imageName // "unknown"')
+              POWER_STATE=$(echo "$VM_DETAILS" | jq -r '.powerState // "unknown"')
+              
+              echo "  📊 $host:"
+              echo "    Power State: $POWER_STATE"
+              echo "    Tag ImageName: $VM_TAG"
+              
+              if [ "$VM_IMAGE_ID" == "marketplace" ] || [ "$VM_IMAGE_ID" == "null" ] || [ -z "$VM_IMAGE_ID" ]; then
+                echo "    Image Source: Marketplace image"
+              else
+                IMAGE_NAME=$(basename "$VM_IMAGE_ID")
+                echo "    Image Source: Custom image: $IMAGE_NAME"
+                echo "    Full Image ID: $VM_IMAGE_ID"
+              fi
             else
-              IMAGE_NAME=$(basename "$VM_IMAGE_ID")
-              echo "  $host: Using custom image: $IMAGE_NAME (tag: $VM_TAGS)"
+              echo "  ❌ Failed to get details for $host"
             fi
+            echo ""
           done
           
-          echo ""
-          echo "✅ Verification completed"
+          echo "✅ Verification completed successfully"
 
       - name: Post Update Actions
         if: steps.plan.outputs.exitcode == '2' || (github.event.inputs.force_recreate == 'true' && steps.plan.outcome == 'success')
@@ -350,10 +510,14 @@ jobs:
           echo "## 🎉 AVD Host Pool Update Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Changes Applied:" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Updated to image: ${{ steps.find-image.outputs.image_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Updated to latest image (Terraform selected automatically)" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ Session hosts recreated with new image" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ AVD agent reinstalled and registered" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ AVD environment ready for use" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Resource Groups Used:" >> $GITHUB_STEP_SUMMARY
+          echo "- Images: ${{ steps.get-config.outputs.image_resource_group }}" >> $GITHUB_STEP_SUMMARY
+          echo "- AVD Infrastructure: ${{ steps.get-config.outputs.avd_resource_group }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Next Steps:" >> $GITHUB_STEP_SUMMARY
           echo "1. Test AVD connectivity at: https://rdweb.wvd.microsoft.com/arm/webclient/index.html" >> $GITHUB_STEP_SUMMARY
@@ -373,6 +537,10 @@ jobs:
           echo "- Image in use: ${{ steps.current-image.outputs.current_image }}" >> $GITHUB_STEP_SUMMARY
           echo "- Latest available: ${{ steps.find-image.outputs.image_name }}" >> $GITHUB_STEP_SUMMARY
           echo "- No changes required" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Resource Groups:" >> $GITHUB_STEP_SUMMARY
+          echo "- Images: ${{ steps.get-config.outputs.image_resource_group }}" >> $GITHUB_STEP_SUMMARY
+          echo "- AVD Infrastructure: ${{ steps.get-config.outputs.avd_resource_group }}" >> $GITHUB_STEP_SUMMARY
 
       - name: Upload Terraform Logs
         if: failure()
