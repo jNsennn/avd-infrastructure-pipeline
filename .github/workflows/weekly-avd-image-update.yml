@@ -231,6 +231,7 @@ jobs:
         echo "| Source Image | ${{ steps.find-image.outputs.latest_image || 'Marketplace Image' }} |" >> $GITHUB_STEP_SUMMARY
         echo "| Resource Group | ${{ secrets.AZURE_RESOURCE_GROUP }} |" >> $GITHUB_STEP_SUMMARY
         echo "| Build Time | $(date) |" >> $GITHUB_STEP_SUMMARY
+        echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
         
         if [ "${{ job.status }}" == "success" ]; then
           echo "| Next Steps | Image is ready for AVD deployment |" >> $GITHUB_STEP_SUMMARY
@@ -242,14 +243,49 @@ jobs:
           echo "- Verify Azure credentials and permissions" >> $GITHUB_STEP_SUMMARY
           echo "- Ensure WinRM connectivity is working" >> $GITHUB_STEP_SUMMARY
         fi
-    - name: Trigger Host Pool Update
+    
+    - name: Trigger Host Pool Update (Debug)
       if: success()
       run: |
-        # Trigger the host pool update workflow
-        curl -X POST \
+        echo "🔍 Debug Info:"
+        echo "  Current branch: ${{ github.ref_name }}"
+        echo "  Built image: ${{ steps.find-image.outputs.new_image_name }}"
+        echo "  Repository: ${{ github.repository }}"
+        echo ""
+        
+        echo "🚀 Triggering AVD host pool update workflow..."
+        
+        # Use workflow_dispatch with proper branch and inputs
+        response=$(curl -s -w "HTTPSTATUS:%{http_code}" -X POST \
           -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
           -H "Accept: application/vnd.github.v3+json" \
+          -H "Content-Type: application/json" \
           https://api.github.com/repos/${{ github.repository }}/actions/workflows/update-avd-hostpool.yml/dispatches \
-          -d '{"ref":"main"}'
+          -d '{
+            "ref": "${{ github.ref_name }}",
+            "inputs": {
+              "force_recreate": "false",
+              "image_name": "${{ steps.find-image.outputs.new_image_name }}"
+            }
+          }')
         
-        echo "✅ Triggered AVD host pool update workflow"
+        # Parse response
+        http_code=$(echo $response | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
+        response_body=$(echo $response | sed -E 's/HTTPSTATUS\:[0-9]{3}$//')
+        
+        echo "HTTP Status: $http_code"
+        if [ "$response_body" != "" ]; then
+          echo "Response: $response_body"
+        fi
+        
+        if [ $http_code -eq 204 ]; then
+          echo "✅ Successfully triggered AVD host pool update workflow"
+          echo "   Branch: ${{ github.ref_name }}"
+          echo "   Image: ${{ steps.find-image.outputs.new_image_name }}"
+        else
+          echo "❌ Failed to trigger workflow"
+          echo "   This is likely a permissions issue with GITHUB_TOKEN"
+          echo "   The workflow_run trigger should still work automatically"
+          echo "   Consider using a PAT token or removing this step to rely on workflow_run"
+          # Don't exit 1 here so we can see what happened
+        fi
