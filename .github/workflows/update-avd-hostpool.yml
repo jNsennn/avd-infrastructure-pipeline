@@ -23,8 +23,7 @@ on:
     workflows: ["Weekly AVD Image Update"]
     types:
       - completed
-    branches: [main]
-
+      
 env:
   TF_VAR_admin_password: ${{ secrets.AVD_ADMIN_PASSWORD }}
   ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
