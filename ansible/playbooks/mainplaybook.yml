@@ -92,13 +92,18 @@
         params: '/64bit /Language:en-us /Product:O365ProPlusRetail /Exclude:Publisher,Access,Lync,Groove'
       ignore_errors: true
 
-    - name: Install Windows Updates (excluding problematic ones)
+    - name: "[ WINDOWS | UPDATE ] Install All Windows Updates"
       ansible.windows.win_updates:
         category_names:
           - SecurityUpdates
           - CriticalUpdates
           - UpdateRollups
+        reject_list:
+          - "KB5007651"  # Windows Security platform update causing reboot loop
         reboot: true
+        reboot_timeout: 1800
+      ignore_errors: true
+      when: debug_updates | default(true) | bool
 
     - name: "[ WINDOWS | UPDATE ] Wait for system to become reachable over WinRM"
       ansible.builtin.wait_for_connection:
